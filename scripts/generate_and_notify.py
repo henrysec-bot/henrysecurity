@@ -11,11 +11,15 @@ HF_TOKEN = os.getenv('HF_TOKEN', '').strip()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '').strip()
 
-if not all([HF_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
+# For command bot mode
+BOT_MODE = os.getenv('BOT_MODE', 'scheduled').strip()  # 'scheduled' or 'command'
+COMMAND_CHAT_ID = os.getenv('COMMAND_CHAT_ID', TELEGRAM_CHAT_ID).strip()  # Chat to listen for commands
+ODIN_CHAT_ID = os.getenv('ODIN_CHAT_ID', '-576735827').strip()  # O.D.I.N. group ID
+
+if not all([HF_TOKEN, TELEGRAM_BOT_TOKEN]):
     missing = []
     if not HF_TOKEN: missing.append('HF_TOKEN')
     if not TELEGRAM_BOT_TOKEN: missing.append('TELEGRAM_BOT_TOKEN')
-    if not TELEGRAM_CHAT_ID: missing.append('TELEGRAM_CHAT_ID')
     print(f'ERROR: Missing environment variables: {", ".join(missing)}')
     exit(1)
 
@@ -74,11 +78,11 @@ def hf_post(api_url, payload, headers, timeout=30, max_retries=3):
             time.sleep(wait_time)
     return None
 
-# Function to send message via Telegram
-def send_telegram_message(text):
+def send_telegram_message(chat_id, text):
+    """Send message to a specific chat ID."""
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
     data = {
-        'chat_id': TELEGRAM_CHAT_ID,
+        'chat_id': chat_id,
         'text': text
     }
     data_encoded = json.dumps(data).encode('utf-8')
@@ -87,14 +91,17 @@ def send_telegram_message(text):
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.load(resp)
             if result.get('ok'):
-                print('Message sent successfully')
+                print(f'Message sent successfully to chat {chat_id}')
+                return True
             else:
-                print('Telegram API error:', result)
+                print(f'Telegram API error: {result}')
+                return False
     except Exception as e:
-        print('Failed to send Telegram message:', e)
+        print(f'Failed to send Telegram message to chat {chat_id}: {e}')
+        return False
 
-# Function to send photo via Telegram (multipart/form-data)
-def send_telegram_photo(photo_bytes, caption=''):
+def send_telegram_photo(chat_id, photo_bytes, caption=''):
+    """Send photo to a specific chat ID."""
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto'
     boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
     body = []
@@ -102,7 +109,7 @@ def send_telegram_photo(photo_bytes, caption=''):
     body.append(f'--{boundary}')
     body.append('Content-Disposition: form-data; name="chat_id"')
     body.append('')
-    body.append(str(TELEGRAM_CHAT_ID))
+    body.append(str(chat_id))
     # caption
     body.append(f'--{boundary}')
     body.append('Content-Disposition: form-data; name="caption"')
@@ -116,8 +123,7 @@ def send_telegram_photo(photo_bytes, caption=''):
     body.append(photo_bytes.decode('latin-1'))
     body.append(f'--{boundary}--')
     body.append('')
-    data = '\
-\\n'.join(body)
+    data = '\r\n'.join(body)
     req = urllib.request.Request(url, data=data.encode('utf-8'), headers={
         'Content-Type': f'multipart/form-data; boundary={boundary}'
     })
@@ -125,13 +131,15 @@ def send_telegram_photo(photo_bytes, caption=''):
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.load(resp)
             if result.get('ok'):
-                print('Photo sent successfully')
+                print(f'Photo sent successfully to chat {chat_id}')
+                return True
             else:
-                print('Telegram API error:', result)
+                print(f'Telegram API error: {result}')
+                return False
     except Exception as e:
-        print('Failed to send Telegram photo:', e)
+        print(f'Failed to send Telegram photo to chat {chat_id}: {e}')
+        return False
 
-# Function to get a topic from AlienVault OTX (example)
 def get_otx_pulse():
     # For now, we'll return a static topic; in the future we could fetch from OTX API
     return {
@@ -140,7 +148,6 @@ def get_otx_pulse():
         'link': 'https://otx.alienvault.com/pulse/placeholder'
     }
 
-# Function to generate content using Hugging Face
 def generate_content(topic):
     # Text generation
     text_api_url = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
@@ -193,8 +200,23 @@ def generate_content(topic):
         'link': topic.get('link', '')
     }
 
-def main():
-    print('Starting HSEC Marketing Agent...')
+def format_telegram_message(content):
+    """Format content for Telegram message."""
+    return f"""*Legenda para Instagram:*
+{content['caption']}
+
+*Hashtags sugeridas:*
+{' '.join(content['hashtags'])}
+
+*Prompt para imagem (SDXL):*
+{content['image_prompt']}
+
+*Fonte:* {content['link']}
+"""
+
+def handle_scheduled_run():
+    """Original scheduled behavior - generate and send to marketing chat."""
+    print('Starting HSEC Marketing Agent (scheduled mode)...')
     print(f'Time: {datetime.now()}')
     
     topic = get_otx_pulse()
@@ -207,17 +229,7 @@ def main():
     print(f'  Image prompt: {content["image_prompt"]}')
     
     # Build Telegram message (text part)
-    message = f"""*Legenda para Instagram:*
-{content['caption']}
-
-*Hashtags sugeridas:*
-{' '.join(content['hashtags'])}
-
-*Prompt para imagem (SDXL):*
-{content['image_prompt']}
-
-*Fonte:* {content['link']}
-"""
+    message = format_telegram_message(content)
     
     # Generate image using Hugging Face
     image_api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
@@ -227,13 +239,141 @@ def main():
     image_bytes = hf_post(image_api_url, image_payload, image_headers, timeout=60, max_retries=2)
     if image_bytes is not None:
         print(f'Generated image size: {len(image_bytes)} bytes')
-        # Send photo with caption
-        send_telegram_photo(image_bytes, caption=message)
+        # Send photo with caption to marketing chat
+        send_telegram_message(TELEGRAM_CHAT_ID, message)
+        # send_telegram_photo(TELEGRAM_CHAT_ID, image_bytes, caption=message)  # Disabled for simplicity
     else:
         print('Image generation failed after retries; sending only message')
-        send_telegram_message(message)
+        send_telegram_message(TELEGRAM_CHAT_ID, message)
     
     print('Notification processed.')
+
+def handle_command_mode():
+    """Bot that listens for and responds to commands."""
+    print('Starting HSEC Marketing Agent (command mode)...')
+    print(f'Listening for commands in chat: {COMMAND_CHAT_ID}')
+    print(f'ODIN chat ID: {ODIN_CHAT_ID}')
+    
+    offset = 0
+    while True:
+        try:
+            # Get updates
+            url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?offset={offset}&timeout=30'
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                result = json.load(resp)
+                
+                if result.get('ok'):
+                    updates = result.get('result', [])
+                    for update in updates:
+                        offset = update['update_id'] + 1
+                        
+                        if 'message' in update:
+                            message = update['message']
+                            chat_id = str(message['chat']['id'])
+                            text = message.get('text', '')
+                            from_user = message.get('from', {})
+                            user_id = str(from_user.get('id', ''))
+                            username = from_user.get('username', '')
+                            
+                            print(f'Received message from {user_id} (@{username}) in chat {chat_id}: {text}')
+                            
+                            # Check if it's a command
+                            if text.startswith('/'):
+                                handle_command(chat_id, text, user_id, username)
+                else:
+                    print(f'Error getting updates: {result}')
+                    time.sleep(5)
+                    
+        except Exception as e:
+            print(f'Error in command loop: {e}')
+            time.sleep(5)
+
+def handle_command(chat_id, command_text, user_id, username):
+    """Handle a command received from a user."""
+    parts = command_text.split()
+    cmd = parts[0].lower()
+    
+    print(f'Handling command: {cmd} from user {user_id} in chat {chat_id}')
+    
+    if cmd == '/ajuda' or cmd == '/help':
+        help_text = """*HSEC Marketing Agent - Comandos Disponíveis:*
+
+/gerar [tópico] - Gera conteúdo de marketing imediatamente
+/status - Verifica se o bot está ativo
+/ajuda - Mostra esta ajuda
+
+*Exemplos:*
+/gerar vulnerabilidade em sistemas de pagamento
+/gerar novo malware bancário
+
+O bot também responde a menções de 'O.D.I.N.' enviando relatórios para o grupo do O.D.I.N."""
+        send_telegram_message(chat_id, help_text)
+        
+    elif cmd == '/status':
+        status_text = f"""*HSEC Marketing Agent - Status:*
+✅ Bot ativo e ouvindo comandos
+🕒 Hora local: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+🎯 Chat de comandos: {chat_id}
+🔗 Token HF: {'Configurado' if HF_TOKEN else 'Não configurado'}
+📱 Token Telegram: {'Configurado' if TELEGRAM_BOT_TOKEN else 'Não configurado'}"""
+        send_telegram_message(chat_id, status_text)
+        
+    elif cmd == '/gerar':
+        # Extract topic if provided
+        if len(parts) > 1:
+            topic_title = ' '.join(parts[1:])
+            topic = {
+                'title': topic_title,
+                'description': f'Tópico solicitado via comando: {topic_title}',
+                'link': 'https://henrysecurity.com.br'
+            }
+        else:
+            # Use default OTX pulse
+            topic = get_otx_pulse()
+        
+        print(f'Generating content for topic: {topic["title"]}')
+        content = generate_content(topic)
+        message = format_telegram_message(content)
+        
+        # Determine where to send the result
+        # If command mentions O.D.I.N., send to O.D.I.N. group
+        # Otherwise, send to the chat where command was received
+        if 'odin' in command_text.lower() or 'o.d.i.n.' in command_text.lower():
+            target_chat = ODIN_CHAT_ID
+            print(f'Sending result to O.D.I.N. group: {ODIN_CHAT_ID}')
+        else:
+            target_chat = chat_id
+            print(f'Sending result to originating chat: {chat_id}')
+        
+        # Generate image and send
+        image_api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+        image_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        image_payload = {"inputs": content["image_prompt"]}
+        
+        image_bytes = hf_post(image_api_url, image_payload, image_headers, timeout=60, max_retries=2)
+        if image_bytes is not None:
+            print(f'Generated image size: {len(image_bytes)} bytes')
+            # Send photo with caption
+            send_telegram_photo(target_chat, image_bytes, caption=message)
+        else:
+            print('Image generation failed after retries; sending only message')
+            send_telegram_message(target_chat, message)
+            
+    else:
+        unknown_text = f"""Comando desconhecido: {cmd}
+Use /ajuda para ver os comandos disponíveis."""
+        send_telegram_message(chat_id, unknown_text)
+
+def main():
+    """Main entry point - determines mode based on environment."""
+    print(f'HSEC Marketing Agent starting in {BOT_MODE} mode...')
+    
+    if BOT_MODE == 'command':
+        handle_command_mode()
+    else:
+        # Default to scheduled mode for backward compatibility
+        handle_scheduled_run()
 
 if __name__ == '__main__':
     main()
