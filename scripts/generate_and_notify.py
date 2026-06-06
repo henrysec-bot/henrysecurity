@@ -1,12 +1,14 @@
 import os
 import json
 import urllib.request
+import urllib.error
 from datetime import datetime
+import time
 
 # Configuration
-HF_TOKEN = os.getenv('HF_TOKEN')
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+HF_TOKEN = os.getenv('HF_TOKEN', '').strip()
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '').strip()
 
 if not all([HF_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     missing = []
@@ -15,6 +17,37 @@ if not all([HF_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     if not TELEGRAM_CHAT_ID: missing.append('TELEGRAM_CHAT_ID')
     print(f'ERROR: Missing environment variables: {", ".join(missing)}')
     exit(1)
+
+def hf_post(api_url, payload, headers, timeout=30, max_retries=3):
+    """POST to Hugging Face Inference API with retries and timeout."""
+    data = json.dumps(payload).encode('utf-8')
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(api_url, data=data, headers=headers, method='POST')
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.getcode() == 200:
+                    return resp.read()
+                else:
+                    print(f'HF API returned status {resp.getcode()} (attempt {attempt+1})')
+                    if attempt == max_retries - 1:  # last attempt
+                        # Try to read error body if available
+                        try:
+                            error_body = resp.read().decode('utf-8')
+                            print(f'HF API error body: {error_body[:200]}')
+                        except:
+                            pass
+        except urllib.error.URLError as e:
+            print(f'HF API request failed (attempt {attempt+1}): {str(e)}')
+            if hasattr(e, 'reason') and isinstance(e.reason, OSError):
+                if e.reason.errno in (-5, 11001):  # DNS resolution errors
+                    print('DNS resolution error - checking network...')
+        except Exception as e:
+            print(f'Unexpected error calling HF API (attempt {attempt+1}): {str(e)}')
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt  # exponential backoff: 1, 2, 4 seconds
+            print(f'Retrying in {wait_time} seconds...')
+            time.sleep(wait_time)
+    return None
 
 # Function to send message via Telegram
 def send_telegram_message(text):
@@ -27,7 +60,7 @@ def send_telegram_message(text):
     data_encoded = json.dumps(data).encode('utf-8')
     req = urllib.request.Request(url, data=data_encoded, headers={'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.load(resp)
             if result.get('ok'):
                 print('Message sent successfully')
@@ -64,7 +97,7 @@ def send_telegram_photo(photo_bytes, caption=''):
         'Content-Type': f'multipart/form-data; boundary={boundary}'
     })
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.load(resp)
             if result.get('ok'):
                 print('Photo sent successfully')
@@ -108,14 +141,20 @@ def generate_content(topic):
         }
     }
     
-    text_data = json.dumps(text_payload).encode('utf-8')
-    text_req = urllib.request.Request(text_api_url, data=text_data, headers=text_headers)
-    try:
-        with urllib.request.urlopen(text_req) as resp:
-            text_result = json.load(resp)
-            generated_text = text_result[0]['generated_text'] if isinstance(text_result, list) and len(text_result) > 0 else ""
-    except Exception as e:
-        print('Error calling Hugging Face text API:', e)
+    image_bytes = hf_post(text_api_url, text_payload, text_headers, timeout=30, max_retries=3)
+    generated_text = ''
+    if image_bytes is not None:
+        try:
+            text_result = json.loads(image_bytes.decode('utf-8'))
+            # The API returns a list of dicts with generated_text
+            if isinstance(text_result, list) and len(text_result) > 0:
+                generated_text = text_result[0].get('generated_text', '')
+            else:
+                generated_text = str(text_result)
+        except Exception as e:
+            print('Error parsing HF text response:', e)
+            generated_text = f'Fique atento! {topic["title"]} - {topic["description"][:100]}...'
+    else:
         generated_text = f'Fique atento! {topic["title"]} - {topic["description"][:100]}...'
     
     # For hashtags and image prompt, we'll use simple extraction or defaults
@@ -159,22 +198,14 @@ def main():
     image_api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
     image_headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     image_payload = {"inputs": content["image_prompt"]}
-    image_data = json.dumps(image_payload).encode('utf-8')
-    image_req = urllib.request.Request(image_api_url, data=image_data, headers=image_headers, method='POST')
-    try:
-        with urllib.request.urlopen(image_req) as resp:
-            if resp.getcode() == 200:
-                image_bytes = resp.read()
-                print(f'Generated image size: {len(image_bytes)} bytes')
-                # Send photo with caption
-                send_telegram_photo(image_bytes, caption=message)
-            else:
-                print(f'Image generation failed with status {resp.getcode()}')
-                # Fallback: send only message
-                send_telegram_message(message)
-    except Exception as e:
-        print('Error calling Hugging Face image API:', e)
-        # Fallback: send only message
+    
+    image_bytes = hf_post(image_api_url, image_payload, image_headers, timeout=60, max_retries=2)
+    if image_bytes is not None:
+        print(f'Generated image size: {len(image_bytes)} bytes')
+        # Send photo with caption
+        send_telegram_photo(image_bytes, caption=message)
+    else:
+        print('Image generation failed after retries; sending only message')
         send_telegram_message(message)
     
     print('Notification processed.')
