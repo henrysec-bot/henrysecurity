@@ -78,6 +78,7 @@ def hf_post(api_url, payload, headers, timeout=30, max_retries=3):
             time.sleep(wait_time)
     return None
 
+# Function to send message via Telegram
 def send_telegram_message(chat_id, text):
     """Send message to a specific chat ID."""
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
