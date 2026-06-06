@@ -2,8 +2,9 @@ import os
 import json
 import urllib.request
 import urllib.error
-from datetime import datetime
+import socket
 import time
+from datetime import datetime
 
 # Configuration
 HF_TOKEN = os.getenv('HF_TOKEN', '').strip()
@@ -18,8 +19,32 @@ if not all([HF_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID]):
     print(f'ERROR: Missing environment variables: {", ".join(missing)}')
     exit(1)
 
+def resolve_host(hostname, max_retries=3, delay=1):
+    """Resolve hostname with retries."""
+    for i in range(max_retries):
+        try:
+            socket.gethostbyname(hostname)
+            return True
+        except socket.gaierror as e:
+            if i < max_retries - 1:
+                wait_time = delay * (2 ** i)  # exponential backoff
+                print(f'DNS resolution failed for {hostname} (attempt {i+1}): {e}. Retrying in {wait_time}s...')
+                time.sleep(wait_time)
+            else:
+                print(f'DNS resolution failed for {hostname} after {max_retries} attempts: {e}')
+                return False
+    return False
+
 def hf_post(api_url, payload, headers, timeout=30, max_retries=3):
     """POST to Hugging Face Inference API with retries and timeout."""
+    # Extract hostname for DNS pre-check
+    from urllib.parse import urlparse
+    parsed = urlparse(api_url)
+    hostname = parsed.hostname
+    if hostname and not resolve_host(hostname, max_retries=2, delay=1):
+        print('Skipping HF API call due to DNS resolution failure')
+        return None
+        
     data = json.dumps(payload).encode('utf-8')
     for attempt in range(max_retries):
         try:
@@ -92,7 +117,7 @@ def send_telegram_photo(photo_bytes, caption=''):
     body.append(photo_bytes.decode('latin-1'))
     body.append(f'--{boundary}--')
     body.append('')
-    data = '\r\n'.join(body)
+    data = '\\r\\n'.join(body)
     req = urllib.request.Request(url, data=data.encode('utf-8'), headers={
         'Content-Type': f'multipart/form-data; boundary={boundary}'
     })
@@ -192,7 +217,7 @@ def main():
 {content['image_prompt']}
 
 *Fonte:* {content['link']}
-    """
+"""
     
     # Generate image using Hugging Face
     image_api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
