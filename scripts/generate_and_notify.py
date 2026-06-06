@@ -79,8 +79,7 @@ def send_telegram_message(text):
     url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
     data = {
         'chat_id': TELEGRAM_CHAT_ID,
-        'text': text,
-        'parse_mode': 'Markdown'
+        'text': text
     }
     data_encoded = json.dumps(data).encode('utf-8')
     req = urllib.request.Request(url, data=data_encoded, headers={'Content-Type': 'application/json'})
@@ -117,7 +116,8 @@ def send_telegram_photo(photo_bytes, caption=''):
     body.append(photo_bytes.decode('latin-1'))
     body.append(f'--{boundary}--')
     body.append('')
-    data = '\\r\\n'.join(body)
+    data = '\
+\\n'.join(body)
     req = urllib.request.Request(url, data=data.encode('utf-8'), headers={
         'Content-Type': f'multipart/form-data; boundary={boundary}'
     })
